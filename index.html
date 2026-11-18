@@ -114,6 +114,11 @@
   .hide-m .wrow:not(.revealed) .means, .hide-m .wrow:not(.revealed) .exs .ko { filter: blur(6px); }
   .ex-play { display: inline-flex; vertical-align: -3px; margin-left: 4px; width: 22px; height: 22px; border-radius: 50%; background: var(--surface2); color: var(--muted); align-items: center; justify-content: center; }
   .ex-play svg { width: 10px; height: 10px; margin-left: 1px; }
+  .roots { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 2px 0 6px; }
+  .roots .pos { font-size: 12px; padding: 2px 7px; }
+  .root { font-size: 14px; font-weight: 750; color: var(--accent); background: var(--surface); border: 1.5px solid var(--accent-soft); border-radius: 8px; padding: 2px 8px; }
+  .uh { font-size: 13px; font-weight: 750; color: var(--accent); margin: 14px 2px 6px; }
+  .dcell small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 3px; }
   .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 16px 0 8px; }
   .actions .wide { grid-column: 1 / -1; }
 
@@ -300,6 +305,9 @@ const studyWords = (n) => dayObj(n).words.filter((w) => w.h || P.settings.withDe
 const isFamRoot = (w) => +w.id.split('.')[1] === w.f;
 // 고등편: 표제어 n · 파생어 m / 중등편(전부 표제어): 단어 n
 const dayCountText = (ws) => { const h = ws.filter((w) => w.h).length; return h === ws.length ? `단어 ${ws.length}` : `표제어 ${h} · 파생어 ${ws.length - h}`; };
+// DAY를 PART(접두사·어근·접미사)별로 묶기, 칸 안에는 첫 어원을 짧게
+const partsOf = (b) => { const out = []; for (const d of b.days) { if (!out.length || out[out.length - 1][0] !== (d.part || '')) out.push([d.part || '', []]); out[out.length - 1][1].push(d); } return out; };
+const rootHint = (d) => { const r = (d.roots || '').split(' ')[0] || ''; return r.length > 7 ? r.slice(0, 6) + '…' : r || `${d.words.filter((w) => w.h).length}개`; };
 // 책 고르기 (오늘·단어·테스트 화면 위)
 const bookSwitch = () => DATA.books.length < 2 ? '' : `<div class="seg" style="margin:4px 0 2px">${DATA.books.map((b) => `<button data-act="setBook" data-k="${b.key}" class="${b.key === BOOK.key ? 'on' : ''}">${esc(b.name)}</button>`).join('')}</div>`;
 
@@ -361,24 +369,57 @@ const TTS = (() => {
   }
   return { speak, cancel: () => synth && synth.cancel(), ranked, voice, ko, refresh: load, onChange: (f) => listeners.push(f), get ok() { return !!synth; } };
 })();
+// 원어민 녹음 재생. seg가 있으면 긴 파일(DAY 음원)의 그 구간만 재생한다
+// 반환: 'ok' 끝까지 / 'stopped' 다른 재생으로 중단 / 'fail' 재생 불가 → 아이폰 음성으로 대신
 const CLIP = (() => {
   const a = new Audio(); a.preload = 'auto'; a.setAttribute('playsinline', '');
   let token = 0;
-  function play(url) {
-    const my = ++token;
-    a.src = url; a.playbackRate = 1;
-    const started = a.play();       // iOS: 탭 안에서 바로 play()
-    return new Promise((res) => {
-      const fin = (r) => { a.onended = a.onerror = null; clearTimeout(tm); res(my === token ? r : 'stopped'); };
-      const tm = setTimeout(() => fin('ok'), 8000);
-      a.onended = () => fin('ok'); a.onerror = () => fin('fail');
-      started.catch(() => fin('fail'));
-    });
+  const once = (ev, ms) => new Promise((res) => { let t; const f = () => { clearTimeout(t); a.removeEventListener(ev, f); res(true); }; a.addEventListener(ev, f); t = setTimeout(() => { a.removeEventListener(ev, f); res(false); }, ms); });
+  function play(url, seg) {
+    const my = ++token, gone = () => (my === token ? 'fail' : 'stopped');
+    if (a.src !== url) a.src = url;
+    a.playbackRate = 1;
+    a.muted = !!seg;                 // 구간 재생은 위치를 옮길 때까지 소리를 끈다
+    if (!seg) a.currentTime = 0;
+    const started = a.play();        // iOS: 탭 안에서 바로 play()
+    if (!seg) {
+      return new Promise((res) => {
+        const fin = (r) => { a.onended = a.onerror = null; clearTimeout(tm); res(my === token ? r : 'stopped'); };
+        const tm = setTimeout(() => fin('ok'), 8000);
+        a.onended = () => fin('ok'); a.onerror = () => fin('fail');
+        started.catch(() => fin('fail'));
+      });
+    }
+    return (async () => {
+      const [s, e] = seg;
+      try { await started; } catch { return gone(); }
+      if (a.readyState < 1 && !(await once('loadedmetadata', 8000))) return gone();
+      if (my !== token) return 'stopped';
+      a.currentTime = s; await once('seeked', 4000);
+      if (my !== token) return 'stopped';
+      a.muted = false;
+      const limit = performance.now() + (e - s) * 1000 + 6000;
+      while (my === token && a.currentTime < e && !a.ended && performance.now() < limit) await sleep(30);
+      if (my !== token) return 'stopped';
+      a.pause(); a.muted = true; return 'ok';
+    })();
   }
   return { play, stop() { token++; a.pause(); } };
 })();
 
 const wordItem = (w, el, extra = {}) => ({ audio: w.au, text: w.w, lang: 'en-US', el, ...extra });
+// 예문: NE능률 DAY 음원(표제어+파생어+예문)에서 찾아 둔 구간 / 없으면 아이폰 음성
+function neDayUrl(id) {
+  const loc = IDX.dayOf.get(id), b = loc && bookOf(loc.b);
+  if (!DATA.neAudio || !b || String(loc.k).startsWith('c')) return null;
+  return encodeURI(DATA.neAudio.replace('{book}', b.name).replace('{day}', pad2(loc.k)));
+}
+function exItem(w, el, extra = {}) {
+  const it = { text: exText(w), lang: 'en-US', el, ...extra };
+  const url = P.settings.exNative !== false && w.exAu && neDayUrl(w.id);
+  if (url) { it.audio = url; it.seg = w.exAu; }
+  return it;
+}
 const enTTS = (text, el, extra = {}) => ({ text, lang: 'en-US', el, ...extra });
 const koTTS = (text, el, extra = {}) => ({ text, lang: 'ko-KR', el, ko: true, ...extra });
 let seq = 0;
@@ -390,7 +431,7 @@ async function playItems(items) {
     if (my !== seq) return;
     clear(); it.el?.classList.add('playing'); $('#playerText').textContent = it.text;
     if (items.length > 1) it.el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    const r = it.audio ? await CLIP.play(it.audio) : 'fail';
+    const r = it.audio ? await CLIP.play(it.audio, it.seg) : 'fail';
     if (r === 'fail' && my === seq) await TTS.speak(it.text, it.lang, it.ko ? TTS.ko() : TTS.voice(P.settings.voiceA), it.ko ? Math.min(1.15, P.settings.rate + 0.15) : P.settings.rate);
     if (my !== seq) return;
     await sleep(it.pause ?? 200);
@@ -478,7 +519,7 @@ function viewToday() {
       <div class="row between"><h2>오늘의 DAY</h2><span class="muted sm">${todayDone}/${list.length} 완료</span></div>
       ${list.map((n) => {
         const ws = dayObj(n).words, heads = ws.filter((w) => w.h);
-        return `<button class="drow" data-act="openDay" data-d="${n}"><span><b>DAY ${pad2(n)}</b> <span class="muted sm">${dayCountText(ws)}</span><div class="muted sm" style="margin-top:3px">${heads.slice(0, 5).map((w) => esc(w.w)).join(', ')} …</div></span><span class="${PB().dayDone[n] ? 'btn sm done' : 'btn sm'}">${PB().dayDone[n] ? '완료' : '학습'}</span></button>`;
+        return `<button class="drow" data-act="openDay" data-d="${n}"><span><b>DAY ${pad2(n)}</b> <span class="muted sm">${dayCountText(ws)}</span><div class="muted sm" style="margin-top:3px">${dayObj(n).roots ? `<b style="color:var(--accent)">${esc(dayObj(n).roots)}</b> · ` : ''}${heads.slice(0, 4).map((w) => esc(w.w)).join(', ')} …</div></span><span class="${PB().dayDone[n] ? 'btn sm done' : 'btn sm'}">${PB().dayDone[n] ? '완료' : '학습'}</span></button>`;
       }).join('') || '<p class="hint">60개 DAY를 모두 학습했어요. 복습과 테스트로 다지세요.</p>'}
       ${list.length && todayDone < list.length ? `<div class="actions"><button class="btn primary" data-act="startDayCards" data-d="${list.find((n) => !PB().dayDone[n])}">카드로 외우기</button><button class="btn" data-act="todayQuiz">오늘 단어 테스트</button></div>`
         : list.length ? `<button class="btn block" data-act="openDay" data-d="${firstUndoneDay() || list[0]}">${firstUndoneDay() ? '오늘 목표 달성! 다음 DAY 더 하기' : '다시 보기'}</button>` : ''}
@@ -518,7 +559,7 @@ function renderDayBody(cur) {
   }
   $('#dayBody').innerHTML = `
     <section class="card"><div class="row between"><h2>DAY</h2><span class="muted sm">${Object.keys(PB().dayDone).length}/${IDX.nDays} 완료</span></div>
-      <div class="days">${BOOK.days.map((d) => `<button class="dcell ${PB().dayDone[d.day] ? 'done' : ''} ${cur.includes(d.day) ? 'today' : ''}" data-act="openDay" data-d="${d.day}">${d.day}<small>${PB().tests[d.day] != null ? `${PB().tests[d.day]}점` : `${d.words.filter((w) => w.h).length}개`}</small></button>`).join('')}</div>
+      ${partsOf(BOOK).map(([part, ds]) => `${part ? `<div class="uh">PART ${esc(part)}</div>` : ''}<div class="days">${ds.map((d) => `<button class="dcell ${PB().dayDone[d.day] ? 'done' : ''} ${cur.includes(d.day) ? 'today' : ''}" data-act="openDay" data-d="${d.day}" title="${esc(d.roots || '')}">${d.day}<small>${PB().tests[d.day] != null ? `${PB().tests[d.day]}점` : esc(rootHint(d))}</small></button>`).join('')}</div>`).join('')}
     </section>
     ${(BOOK.confusing || []).length ? `<section class="card"><h2>혼동 어휘</h2>${BOOK.confusing.map((s, k) => `<button class="drow" data-act="openDay" data-d="c${k + 1}"><span>${esc(s.name)}</span><span class="muted sm">${s.words.length}개</span></button>`).join('')}</section>` : ''}
     <section class="card"><div class="row between"><h2>별표 단어</h2><span class="muted sm">${Object.keys(P.fav).length}개</span></div><button class="btn block" data-act="favCards" ${Object.keys(P.fav).length ? '' : 'disabled'}>별표 단어 카드로 보기</button></section>`;
@@ -554,6 +595,7 @@ function viewDay(key) {
   app.innerHTML = `
     <div class="subtop"><a class="back" href="#/days">‹ 단어</a>${!isConf ? `<span class="muted sm">${n > 1 ? `<a href="#/d/${n - 1}">이전</a>` : ''}${n > 1 && n < IDX.nDays ? ' · ' : ''}${n < IDX.nDays ? `<a href="#/d/${n + 1}">다음</a>` : ''}</span>` : ''}</div>
     <h1>${esc(title)}</h1>
+    ${!isConf && dayObj(n).roots ? `<div class="roots"><span class="pos">${esc(dayObj(n).part)}</span>${dayObj(n).roots.split(' ').map((r) => `<span class="root">${esc(r)}</span>`).join('')}</div>` : ''}
     <div class="muted sm">${esc(BOOK.title)} · ${isConf ? `${words.length}개` : dayCountText(words)}</div>
     <section class="card ${hide ? 'hide-m' : ''}" id="wordCard">
       <div class="sec-h"><span class="label">${hide ? '단어를 보고 뜻을 떠올린 뒤 탭하세요' : '단어를 탭하면 발음'}</span><div class="row"><button class="btn sm ${hide ? 'on' : ''}" data-act="toggleHide">뜻 가리기</button><button class="btn sm primary" data-act="playAll">전체 듣기</button></div></div>
@@ -568,7 +610,7 @@ function viewDay(key) {
 const W = (id) => IDX.byId.get(id);
 ACT.reveal = (el) => el.closest('.wrow').classList.add('revealed');
 ACT.sayWord = (el) => { const r = el.closest('.wrow'); r?.classList.add('revealed'); sayWord(W(el.dataset.id), r); };
-ACT.sayEx = (el) => { const w = W(el.dataset.id); playItems([enTTS(exText(w), el.closest('.wrow'))]); };
+ACT.sayEx = (el) => { const w = W(el.dataset.id); playItems([exItem(w, el.closest('.wrow') || el.closest('.exs'))]); };
 ACT.fav = (el) => { const id = el.dataset.id; if (P.fav[id]) delete P.fav[id]; else P.fav[id] = 1; save(); el.classList.toggle('on', !!P.fav[id]); el.innerHTML = P.fav[id] ? ICON.starOn : ICON.star; };
 ACT.toggleHide = () => { P.settings.hideM = !P.settings.hideM; save(); const y = scrollY; viewDay(CUR.key); scrollTo(0, y); };
 ACT.playAll = () => {
@@ -615,7 +657,7 @@ function viewCards() {
   const loc = IDX.dayOf.get(id);
   const front = dir === 'en' ? `<div class="fw">${esc(w.w)}</div>` : `<div class="fm">${esc(meanLine(w))}</div>`;
   const back = `<div class="back">${dir === 'en' ? `<div class="means" style="font-size:17px">${meanHTML(w)}</div>` : `<div class="fw" style="text-align:center;margin:0 0 10px">${esc(w.w)}</div>`}
-      ${w.ex ? `<div class="exs" style="font-size:15px"><div>${exHTML(w)}</div><div class="ko">${esc(w.exKo)}</div></div>` : ''}</div>`;
+      ${w.ex ? `<div class="exs" style="font-size:15px"><div>${exHTML(w)}<button class="ex-play" data-act="sayEx" data-id="${w.id}" aria-label="예문 듣기">${ICON.play}</button></div><div class="ko">${esc(w.exKo)}</div></div>` : ''}</div>`;
   app.innerHTML = `
     <div class="qtop"><a class="back" href="#/" data-act="quitCards">‹ 그만</a><div class="qbar"><i style="width:${(CS.i / CS.queue.length) * 100}%"></i></div><span class="qnum">${CS.i + 1}/${CS.queue.length}</span></div>
     <div class="seg" style="margin:8px 0">${[['en', '단어 → 뜻'], ['ko', '뜻 → 단어']].map(([k, l]) => `<button data-act="cardDir" data-k="${k}" class="${dir === k ? 'on' : ''}">${l}</button>`).join('')}</div>
@@ -775,7 +817,7 @@ function feedback(ok, q, extra = '') {
   QZ.answered = true; QZ.results.push({ q, ok });
   const w = q.w;
   $('#fb').innerHTML = `
-    <div class="fb ${ok ? 'ok' : 'bad'}"><div><div class="t">${ok ? '정답' : '오답'}</div><div class="a">${esc(q.kind === 'blank' ? q.answer : w.w)}</div><div class="m">${esc(meanLine(w))}</div></div><button class="play" data-act="qSay" aria-label="발음">${ICON.play}</button></div>
+    <div class="fb ${ok ? 'ok' : 'bad'}"><div><div class="t">${ok ? '정답' : '오답'}</div><div class="a">${esc(q.kind === 'blank' ? q.answer : w.w)}</div><div class="m">${esc(meanLine(w))}</div>${q.kind === 'blank' ? `<div class="exs" style="margin-top:6px"><button class="btn sm" data-act="sayEx" data-id="${w.id}">예문 듣기</button></div>` : ''}</div><button class="play" data-act="qSay" aria-label="발음">${ICON.play}</button></div>
     ${extra}<button class="btn primary block" data-act="next">${QZ.i + 1 < QZ.qs.length ? '다음' : '결과 보기'}</button>`;
   if (P.settings.autoplay && q.kind !== 'listen' && q.kind !== 'mean') sayWord(w);
   $('#fb').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -827,6 +869,7 @@ function viewSettings() {
     </section>
     <section class="card"><h2>소리</h2>
       <div class="set-row" style="border-top:0"><div><div>단어 발음</div><div class="set-sub">원어민 녹음 (인터넷 필요, 안 되면 아이폰 음성)</div></div></div>
+      <div class="set-row"><div><div>예문도 원어민 녹음으로</div><div class="set-sub">NE능률 DAY 음원의 해당 문장 (없으면 아이폰 음성)</div></div><input type="checkbox" class="sw" data-set="exNative" ${s.exNative !== false ? 'checked' : ''}></div>
       <div class="set-row"><div><div>전체 듣기에서 뜻도 읽기</div><div class="set-sub">단어 → 한국어 뜻 순서로</div></div><input type="checkbox" class="sw" data-set="readMean" ${s.readMean ? 'checked' : ''}></div>
       <div class="set-row"><span>예문 목소리</span><select id="voiceA"><option value="__system" ${cur === '__system' ? 'selected' : ''}>아이폰 기본 목소리</option>${voices.map((v) => `<option value="${esc(v.name)}" ${cur === v.name ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})</option>`).join('')}</select></div>
       <div class="set-row"><span>예문 속도 <b id="rateV">${s.rate.toFixed(2)}</b></span><input type="range" min="0.6" max="1.2" step="0.05" value="${s.rate}" id="rate"></div>
