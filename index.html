@@ -262,6 +262,19 @@ P.settings.quiz = Object.assign(defaultSettings().quiz, P.settings.quiz || {});
 const save = () => { if (!LS.set('prog', P)) toast('저장 공간이 부족합니다'); };
 const PB = () => (P.byBook[BOOK.key] ||= { dayDone: {}, tests: {}, daily: null });
 const validData = (d) => d && Array.isArray(d.books) && d.books.length && d.books.every((b) => Array.isArray(b.days) && b.days.length && b.days[0].words);
+// 예전 형식(고등편만, { days, confusing })도 받아서 새 형식으로 바꾼다
+function normalizeData(d) {
+  if (!d || typeof d !== 'object') return null;
+  if (Array.isArray(d.books)) return d;
+  if (!Array.isArray(d.days)) return null;
+  const conv = (w, i) => ({ ...w, id: 'h' + w.id, h: w.h ?? 1, f: w.f ?? i });
+  return {
+    v: 2, source: d.source, old: true,
+    books: [{ key: 'h', name: '고등', title: d.book || '능률 VOCA 어원편 고등',
+      days: d.days.map((x) => ({ day: x.day, words: x.words.map((w, i) => conv(w, i)) })),
+      confusing: (d.confusing || []).map((s) => ({ name: s.name, words: s.words.map((w, i) => conv(w, i)) })) }],
+  };
+}
 
 function indexData() {
   const byId = new Map(), dayOf = new Map();
@@ -427,19 +440,29 @@ function viewImport() {
         <div><b>1</b><span>컴퓨터에서 받은 <strong>어원보카_데이터.json</strong> 파일을 아이폰 '파일' 앱에 저장해 두세요. (카카오톡 나에게 보내기 → 저장, 또는 iCloud Drive)</span></div>
         <div><b>2</b><span>Safari 공유 버튼 → '홈 화면에 추가'로 먼저 설치하고, 그 앱 안에서 아래 버튼을 누르세요.</span></div>
       </div>
-      <label class="btn primary block">데이터 파일 선택<input type="file" id="importFile" accept=".json,application/json" hidden></label>
+      <label class="btn primary block">데이터 파일 선택<input type="file" id="importFile" accept=".json,application/json,text/plain" hidden></label>
+      <p class="hint" id="importMsg" style="color:var(--red)"></p>
     </div>`;
   $('#importFile').onchange = (e) => importFile(e.target.files[0]);
 }
+// 원인별로 다른 안내를 보여준다 (토스트는 짧아서, 첫 화면에도 같은 내용을 적어 둔다)
+function importError(msg) { toast(msg); const box = $('#importMsg'); if (box) box.textContent = msg; }
 async function importFile(f) {
   if (!f) return;
-  try {
-    const d = JSON.parse(await f.text());
-    if (!validData(d)) throw 0;
-    if (!(await IDB.set('book', d))) return toast('저장하지 못했습니다');
-    DATA = d; indexData(); toast(`${d.books.map((b) => b.name).join('·')} 단어를 불러왔습니다`); go('#/');
-  } catch { toast('올바른 데이터 파일이 아닙니다'); }
+  let raw, d;
+  try { raw = await f.text(); } catch (e) { return importError(`파일을 열지 못했습니다 (${e?.message || e})`); }
+  try { d = normalizeData(JSON.parse(raw)); } catch { return importError(`JSON 형식이 아닌 파일입니다: ${f.name} (${Math.round(f.size / 1024)}KB)`); }
+  if (!validData(d)) return importError(`어원보카 데이터 파일이 아닙니다: ${f.name} (${Math.round(f.size / 1024)}KB)`);
+  let saved = false;
+  try { saved = await IDB.set('book', d); } catch {}
+  if (!saved) return importError('기기에 저장하지 못했습니다. 저장 공간을 확인해 주세요');
+  try { DATA = d; indexData(); go('#/'); }
+  catch (e) { return importError(`불러온 뒤 화면을 그리다 오류가 났습니다: ${e?.message || e}`); }
+  toast(d.old ? '고등편만 든 예전 파일이에요. 중등편까지 쓰려면 새 파일을 다시 불러오세요' : `${d.books.map((b) => b.name).join('·')} 단어를 불러왔습니다`);
 }
+// 휴대폰에서 원인을 볼 수 있게, 예상 못 한 오류도 화면에 짧게 알려준다
+window.addEventListener('error', (e) => toast(`오류: ${e.message}`));
+window.addEventListener('unhandledrejection', (e) => toast(`오류: ${e.reason?.message || e.reason}`));
 
 // ================= 오늘 =================
 function viewToday() {
