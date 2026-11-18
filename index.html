@@ -251,25 +251,44 @@ const today = () => ymd();
 const DOW = ['일', '월', '화', '수', '목', '금', '토'];
 
 // ================= 데이터 · 기록 =================
-let BOOK = null, IDX = null;
-const defaultSettings = () => ({ perDay: 1, rate: 0.9, voiceA: '', autoplay: true, hideM: false, withDeriv: false, readMean: true,
+// DATA = 책 여러 권(고등·중등), BOOK = 지금 고른 책
+let DATA = null, BOOK = null, IDX = null;
+const defaultSettings = () => ({ book: 'h', perDay: 1, rate: 0.9, voiceA: '', autoplay: true, hideM: false, withDeriv: false, readMean: true,
   quiz: { range: 'today', count: 20, types: { mean: true, word: true, spell: true, blank: true, listen: true } } });
-let P = Object.assign({ dayDone: {}, cards: {}, wrong: {}, days: {}, tests: {}, fav: {}, daily: null }, LS.get('prog', {}));
+// 복습 카드·오답·별표·연속 학습은 책 구분 없이, DAY 완료·점수·오늘 목표는 책마다(byBook)
+let P = Object.assign({ cards: {}, wrong: {}, days: {}, fav: {}, byBook: {} }, LS.get('prog', {}));
 P.settings = Object.assign(defaultSettings(), P.settings || {});
 P.settings.quiz = Object.assign(defaultSettings().quiz, P.settings.quiz || {});
 const save = () => { if (!LS.set('prog', P)) toast('저장 공간이 부족합니다'); };
-const validBook = (d) => d && Array.isArray(d.days) && d.days.length >= 10 && d.days[0].words;
+const PB = () => (P.byBook[BOOK.key] ||= { dayDone: {}, tests: {}, daily: null });
+const validData = (d) => d && Array.isArray(d.books) && d.books.length && d.books.every((b) => Array.isArray(b.days) && b.days.length && b.days[0].words);
 
-function indexBook() {
+function indexData() {
   const byId = new Map(), dayOf = new Map();
-  for (const d of BOOK.days) for (const w of d.words) { byId.set(w.id, w); dayOf.set(w.id, d.day); }
-  (BOOK.confusing || []).forEach((s, k) => s.words.forEach((w) => { byId.set(w.id, w); dayOf.set(w.id, 'c' + (k + 1)); }));
-  IDX = { byId, dayOf, nDays: BOOK.days.length };
+  for (const b of DATA.books) {
+    for (const d of b.days) for (const w of d.words) { byId.set(w.id, w); dayOf.set(w.id, { b: b.key, k: d.day }); }
+    (b.confusing || []).forEach((s, k) => s.words.forEach((w) => { byId.set(w.id, w); dayOf.set(w.id, { b: b.key, k: 'c' + (k + 1) }); }));
+  }
+  IDX = { byId, dayOf, nDays: 0 };
+  setBook(P.settings.book);
 }
+function setBook(key) {
+  BOOK = DATA.books.find((b) => b.key === key) || DATA.books[0];
+  P.settings.book = BOOK.key; IDX.nDays = BOOK.days.length;
+  if (!P.settings.quiz.range || /^(day:|c)/.test(P.settings.quiz.range) && !rangeValid(P.settings.quiz.range)) P.settings.quiz.range = 'today';
+}
+const bookOf = (key) => DATA.books.find((b) => b.key === key);
 const dayObj = (n) => BOOK.days[n - 1];
 const confObj = (k) => BOOK.confusing[k - 1];
-const wordsOfRange = (key) => (String(key).startsWith('c') ? confObj(+String(key).slice(1)).words : dayObj(+key).words);
+const rangeValid = (r) => (r.startsWith('day:') ? !!dayObj(+r.slice(4)) : r.startsWith('c') ? !!(BOOK.confusing || [])[+r.slice(1) - 1] : true);
+const wordsOf = (loc) => { const b = bookOf(loc.b); return String(loc.k).startsWith('c') ? b.confusing[+String(loc.k).slice(1) - 1].words : b.days[loc.k - 1].words; };
+const locLabel = (loc) => (loc.b !== BOOK.key ? bookOf(loc.b).name + ' ' : '') + (String(loc.k).startsWith('c') ? '혼동 어휘' : 'DAY ' + pad2(loc.k));
 const studyWords = (n) => dayObj(n).words.filter((w) => w.h || P.settings.withDeriv);
+const isFamRoot = (w) => +w.id.split('.')[1] === w.f;
+// 고등편: 표제어 n · 파생어 m / 중등편(전부 표제어): 단어 n
+const dayCountText = (ws) => { const h = ws.filter((w) => w.h).length; return h === ws.length ? `단어 ${ws.length}` : `표제어 ${h} · 파생어 ${ws.length - h}`; };
+// 책 고르기 (오늘·단어·테스트 화면 위)
+const bookSwitch = () => DATA.books.length < 2 ? '' : `<div class="seg" style="margin:4px 0 2px">${DATA.books.map((b) => `<button data-act="setBook" data-k="${b.key}" class="${b.key === BOOK.key ? 'on' : ''}">${esc(b.name)}</button>`).join('')}</div>`;
 
 // 뜻 표시: "[명] 1. 진보, 발전 2. 진전" → 품사 배지 + 본문, 짧은 뜻 = 첫 번째 뜻
 const posSplit = (m) => { const x = m.match(/^\[([^\]]+)\]\s*(.*)$/); return x ? [x[1], x[2]] : ['', m]; };
@@ -282,16 +301,16 @@ const exHTML = (w) => (w.ex || []).map(([t, h]) => (h ? `<mark>${esc(t)}</mark>`
 function markDay() { P.days[today()] = true; save(); }
 function streak() { let n = 0, d = today(); if (!P.days[d]) d = addDays(d, -1); while (P.days[d]) { n++; d = addDays(d, -1); } return n; }
 function todayDays() {
-  const t = today(), per = P.settings.perDay;
-  if (!P.daily || P.daily.date !== t || P.daily.per !== per) {
-    const keep = P.daily && P.daily.date === t ? P.daily.list.filter((n) => P.dayDone[n] === t) : [];
+  const t = today(), per = P.settings.perDay, pb = PB();
+  if (!pb.daily || pb.daily.date !== t || pb.daily.per !== per) {
+    const keep = pb.daily && pb.daily.date === t ? pb.daily.list.filter((n) => pb.dayDone[n] === t) : [];
     const list = [...keep];
-    for (let n = 1; n <= IDX.nDays && list.length < Math.max(per, keep.length); n++) if (!P.dayDone[n] && !list.includes(n)) list.push(n);
-    P.daily = { date: t, per, list }; save();
+    for (let n = 1; n <= IDX.nDays && list.length < Math.max(per, keep.length); n++) if (!pb.dayDone[n] && !list.includes(n)) list.push(n);
+    pb.daily = { date: t, per, list }; save();
   }
-  return P.daily.list;
+  return pb.daily.list;
 }
-const firstUndoneDay = () => { for (let n = 1; n <= IDX.nDays; n++) if (!P.dayDone[n]) return n; return null; };
+const firstUndoneDay = () => { for (let n = 1; n <= IDX.nDays; n++) if (!PB().dayDone[n]) return n; return null; };
 
 const INTERVALS = [1, 2, 4, 7, 15, 30, 60];
 const dueIds = () => Object.entries(P.cards).filter(([id, c]) => c.due <= today() && IDX.byId.has(id)).map(([id]) => id);
@@ -302,8 +321,9 @@ function gradeCard(id, g) {
   else { c.box = Math.min(c.box + 1, INTERVALS.length - 1); c.due = addDays(t, INTERVALS[c.box]); }
 }
 function toggleDayDone(n) {
-  if (P.dayDone[n]) { delete P.dayDone[n]; save(); return false; }
-  P.dayDone[n] = today();
+  const pb = PB();
+  if (pb.dayDone[n]) { delete pb.dayDone[n]; save(); return false; }
+  pb.dayDone[n] = today();
   for (const w of studyWords(n)) if (!P.cards[w.id]) P.cards[w.id] = { box: 0, due: addDays(today(), 1) };
   markDay(); return true;
 }
@@ -375,8 +395,8 @@ window.addEventListener('hashchange', () => { if (skipNext) { skipNext = false; 
 function route() {
   stopAudio();
   const h = location.hash || '#/';
-  document.body.classList.toggle('no-tabs', !BOOK);
-  if (!BOOK) return viewImport();
+  document.body.classList.toggle('no-tabs', !DATA);
+  if (!DATA) return viewImport();
   let m;
   if (h === '#/' || h === '#') viewToday();
   else if (h === '#/days') viewDays();
@@ -392,7 +412,7 @@ function route() {
   updateBadge();
   if (h !== '#/quiz/run' && h !== '#/cards') window.scrollTo(0, 0);
 }
-function updateBadge() { if (!BOOK) return; const n = dueIds().length, b = $('#dueBadge'); b.hidden = !n; b.textContent = n > 99 ? '99+' : n; }
+function updateBadge() { if (!DATA) return; const n = dueIds().length, b = $('#dueBadge'); b.hidden = !n; b.textContent = n > 99 ? '99+' : n; }
 const ACT = {};
 app.addEventListener('click', (e) => { const el = e.target.closest('[data-act]'); if (!el || !app.contains(el)) return; const f = ACT[el.dataset.act]; if (f) { e.preventDefault(); f(el, e); } });
 
@@ -415,28 +435,29 @@ async function importFile(f) {
   if (!f) return;
   try {
     const d = JSON.parse(await f.text());
-    if (!validBook(d)) throw 0;
+    if (!validData(d)) throw 0;
     if (!(await IDB.set('book', d))) return toast('저장하지 못했습니다');
-    BOOK = d; indexBook(); toast(`DAY ${d.days.length}개를 불러왔습니다`); go('#/');
+    DATA = d; indexData(); toast(`${d.books.map((b) => b.name).join('·')} 단어를 불러왔습니다`); go('#/');
   } catch { toast('올바른 데이터 파일이 아닙니다'); }
 }
 
 // ================= 오늘 =================
 function viewToday() {
   const list = todayDays(), s = streak(), due = dueIds().length, t = today(), d = new Date();
-  const doneN = Object.keys(P.dayDone).length, wordsN = Object.keys(P.cards).length;
+  const doneN = Object.keys(PB().dayDone).length, wordsN = Object.keys(P.cards).length;
   const week = [...Array(7)].map((_, i) => { const day = addDays(t, i - 6); return `<div class="d ${P.days[day] ? 'on' : ''} ${i === 6 ? 'today' : ''}"><i></i><span>${DOW[new Date(day).getDay()]}</span></div>`; }).join('');
-  const todayDone = list.filter((n) => P.dayDone[n]).length;
+  const todayDone = list.filter((n) => PB().dayDone[n]).length;
   app.innerHTML = `
     <header class="top"><div class="date">${d.getMonth() + 1}월 ${d.getDate()}일 ${DOW[d.getDay()]}요일</div><h1>오늘의 단어</h1></header>
+    ${bookSwitch()}
     <section class="card hero"><div><div class="label">연속 학습</div><div class="big">${s}<small>일</small></div></div><div class="week">${week}</div></section>
     <section class="card">
       <div class="row between"><h2>오늘의 DAY</h2><span class="muted sm">${todayDone}/${list.length} 완료</span></div>
       ${list.map((n) => {
         const ws = dayObj(n).words, heads = ws.filter((w) => w.h);
-        return `<button class="drow" data-act="openDay" data-d="${n}"><span><b>DAY ${pad2(n)}</b> <span class="muted sm">표제어 ${heads.length} · 파생어 ${ws.length - heads.length}</span><div class="muted sm" style="margin-top:3px">${heads.slice(0, 5).map((w) => esc(w.w)).join(', ')} …</div></span><span class="${P.dayDone[n] ? 'btn sm done' : 'btn sm'}">${P.dayDone[n] ? '완료' : '학습'}</span></button>`;
+        return `<button class="drow" data-act="openDay" data-d="${n}"><span><b>DAY ${pad2(n)}</b> <span class="muted sm">${dayCountText(ws)}</span><div class="muted sm" style="margin-top:3px">${heads.slice(0, 5).map((w) => esc(w.w)).join(', ')} …</div></span><span class="${PB().dayDone[n] ? 'btn sm done' : 'btn sm'}">${PB().dayDone[n] ? '완료' : '학습'}</span></button>`;
       }).join('') || '<p class="hint">60개 DAY를 모두 학습했어요. 복습과 테스트로 다지세요.</p>'}
-      ${list.length && todayDone < list.length ? `<div class="actions"><button class="btn primary" data-act="startDayCards" data-d="${list.find((n) => !P.dayDone[n])}">카드로 외우기</button><button class="btn" data-act="todayQuiz">오늘 단어 테스트</button></div>`
+      ${list.length && todayDone < list.length ? `<div class="actions"><button class="btn primary" data-act="startDayCards" data-d="${list.find((n) => !PB().dayDone[n])}">카드로 외우기</button><button class="btn" data-act="todayQuiz">오늘 단어 테스트</button></div>`
         : list.length ? `<button class="btn block" data-act="openDay" data-d="${firstUndoneDay() || list[0]}">${firstUndoneDay() ? '오늘 목표 달성! 다음 DAY 더 하기' : '다시 보기'}</button>` : ''}
     </section>
     <section class="grid2">
@@ -449,6 +470,7 @@ function viewToday() {
     </section>`;
 }
 ACT.openDay = (el) => go(`#/d/${el.dataset.d}`);
+ACT.setBook = (el) => { if (el.dataset.k === BOOK.key) return; setBook(el.dataset.k); save(); route(); toast(`${BOOK.name} 단어로 바꿨어요`); };
 ACT.todayQuiz = () => { const qs = buildQuiz('today', 20, { mean: true, word: true, spell: true, blank: true, listen: true }); if (!qs.length) return toast('문제를 만들 단어가 없습니다'); startQuiz(qs, '오늘 단어 테스트', {}); };
 
 // ================= DAY 목록 =================
@@ -457,6 +479,7 @@ function viewDays() {
   const cur = todayDays();
   app.innerHTML = `
     <header class="top"><h1>단어</h1></header>
+    ${bookSwitch()}
     <div class="search"><input id="q" type="search" placeholder="단어나 뜻으로 검색" value="${esc(DAYQ)}" autocomplete="off" autocapitalize="none"></div>
     <div id="dayBody"></div>`;
   $('#q').addEventListener('input', (e) => { DAYQ = e.target.value; renderDayBody(cur); });
@@ -466,15 +489,15 @@ function renderDayBody(cur) {
   const q = DAYQ.trim().toLowerCase();
   if (q) {
     const hits = [];
-    for (const [id, w] of IDX.byId) if (w.w.toLowerCase().includes(q) || w.m.some((m) => m.includes(q))) hits.push([id, w]);
-    $('#dayBody').innerHTML = `<section class="card">${hits.slice(0, 60).map(([id, w]) => { const dn = IDX.dayOf.get(id); return `<button class="drow" data-act="openDay" data-d="${dn}"><span><b>${esc(w.w)}</b> <span class="muted sm">${String(dn).startsWith('c') ? '혼동 어휘' : 'DAY ' + pad2(dn)}</span><div class="muted sm">${esc(shortMean(w))}</div></span></button>`; }).join('') || '<p class="empty">찾는 단어가 없어요</p>'}</section>`;
+    for (const [id, w] of IDX.byId) if (IDX.dayOf.get(id).b === BOOK.key && (w.w.toLowerCase().includes(q) || w.m.some((m) => m.includes(q)))) hits.push([id, w]);
+    $('#dayBody').innerHTML = `<section class="card">${hits.slice(0, 60).map(([id, w]) => { const loc = IDX.dayOf.get(id); return `<button class="drow" data-act="openDay" data-d="${loc.k}"><span><b>${esc(w.w)}</b> <span class="muted sm">${locLabel(loc)}</span><div class="muted sm">${esc(shortMean(w))}</div></span></button>`; }).join('') || '<p class="empty">찾는 단어가 없어요</p>'}</section>`;
     return;
   }
   $('#dayBody').innerHTML = `
-    <section class="card"><div class="row between"><h2>DAY</h2><span class="muted sm">${Object.keys(P.dayDone).length}/${IDX.nDays} 완료</span></div>
-      <div class="days">${BOOK.days.map((d) => `<button class="dcell ${P.dayDone[d.day] ? 'done' : ''} ${cur.includes(d.day) ? 'today' : ''}" data-act="openDay" data-d="${d.day}">${d.day}<small>${P.tests[d.day] != null ? `${P.tests[d.day]}점` : `${d.words.filter((w) => w.h).length}개`}</small></button>`).join('')}</div>
+    <section class="card"><div class="row between"><h2>DAY</h2><span class="muted sm">${Object.keys(PB().dayDone).length}/${IDX.nDays} 완료</span></div>
+      <div class="days">${BOOK.days.map((d) => `<button class="dcell ${PB().dayDone[d.day] ? 'done' : ''} ${cur.includes(d.day) ? 'today' : ''}" data-act="openDay" data-d="${d.day}">${d.day}<small>${PB().tests[d.day] != null ? `${PB().tests[d.day]}점` : `${d.words.filter((w) => w.h).length}개`}</small></button>`).join('')}</div>
     </section>
-    <section class="card"><h2>혼동 어휘</h2>${(BOOK.confusing || []).map((s, k) => `<button class="drow" data-act="openDay" data-d="c${k + 1}"><span>${esc(s.name)}</span><span class="muted sm">${s.words.length}개</span></button>`).join('')}</section>
+    ${(BOOK.confusing || []).length ? `<section class="card"><h2>혼동 어휘</h2>${BOOK.confusing.map((s, k) => `<button class="drow" data-act="openDay" data-d="c${k + 1}"><span>${esc(s.name)}</span><span class="muted sm">${s.words.length}개</span></button>`).join('')}</section>` : ''}
     <section class="card"><div class="row between"><h2>별표 단어</h2><span class="muted sm">${Object.keys(P.fav).length}개</span></div><button class="btn block" data-act="favCards" ${Object.keys(P.fav).length ? '' : 'disabled'}>별표 단어 카드로 보기</button></section>`;
 }
 ACT.favCards = () => startCards(Object.keys(P.fav).filter((id) => IDX.byId.has(id)), '별표 단어', 'days');
@@ -497,18 +520,18 @@ function viewDay(key) {
   const words = isConf ? confObj(+key.slice(1))?.words : dayObj(+key)?.words;
   if (!words) { location.replace('#/days'); return; }
   CUR = { key, words, isConf };
-  const n = +key, done = !isConf && !!P.dayDone[n], hide = P.settings.hideM;
+  const n = +key, done = !isConf && !!PB().dayDone[n], hide = P.settings.hideM;
   let body = '';
   if (isConf) body = words.map((w) => `<div class="fam">${wordRowHTML(w, false)}</div>`).join('');
   else {
-    const fams = []; for (const w of words) { if (w.h || !fams.length) fams.push([w]); else fams[fams.length - 1].push(w); }
+    const fams = []; for (const w of words) { if (isFamRoot(w) || !fams.length) fams.push([w]); else fams[fams.length - 1].push(w); }
     body = fams.map((f) => `<div class="fam">${f.map((w, i) => wordRowHTML(w, i > 0)).join('')}</div>`).join('');
   }
   const title = isConf ? confObj(+key.slice(1)).name : `DAY ${pad2(n)}`;
   app.innerHTML = `
     <div class="subtop"><a class="back" href="#/days">‹ 단어</a>${!isConf ? `<span class="muted sm">${n > 1 ? `<a href="#/d/${n - 1}">이전</a>` : ''}${n > 1 && n < IDX.nDays ? ' · ' : ''}${n < IDX.nDays ? `<a href="#/d/${n + 1}">다음</a>` : ''}</span>` : ''}</div>
     <h1>${esc(title)}</h1>
-    <div class="muted sm">${isConf ? `${words.length}개` : `표제어 ${words.filter((w) => w.h).length} · 파생어 ${words.filter((w) => !w.h).length}`}</div>
+    <div class="muted sm">${esc(BOOK.title)} · ${isConf ? `${words.length}개` : dayCountText(words)}</div>
     <section class="card ${hide ? 'hide-m' : ''}" id="wordCard">
       <div class="sec-h"><span class="label">${hide ? '단어를 보고 뜻을 떠올린 뒤 탭하세요' : '단어를 탭하면 발음'}</span><div class="row"><button class="btn sm ${hide ? 'on' : ''}" data-act="toggleHide">뜻 가리기</button><button class="btn sm primary" data-act="playAll">전체 듣기</button></div></div>
       ${body}
@@ -566,7 +589,7 @@ function viewCards() {
     CS = null; return;
   }
   const id = CS.queue[CS.i], w = W(id), dir = P.settings.cardDir || 'en';
-  const dn = IDX.dayOf.get(id);
+  const loc = IDX.dayOf.get(id);
   const front = dir === 'en' ? `<div class="fw">${esc(w.w)}</div>` : `<div class="fm">${esc(meanLine(w))}</div>`;
   const back = `<div class="back">${dir === 'en' ? `<div class="means" style="font-size:17px">${meanHTML(w)}</div>` : `<div class="fw" style="text-align:center;margin:0 0 10px">${esc(w.w)}</div>`}
       ${w.ex ? `<div class="exs" style="font-size:15px"><div>${exHTML(w)}</div><div class="ko">${esc(w.exKo)}</div></div>` : ''}</div>`;
@@ -574,7 +597,7 @@ function viewCards() {
     <div class="qtop"><a class="back" href="#/" data-act="quitCards">‹ 그만</a><div class="qbar"><i style="width:${(CS.i / CS.queue.length) * 100}%"></i></div><span class="qnum">${CS.i + 1}/${CS.queue.length}</span></div>
     <div class="seg" style="margin:8px 0">${[['en', '단어 → 뜻'], ['ko', '뜻 → 단어']].map(([k, l]) => `<button data-act="cardDir" data-k="${k}" class="${dir === k ? 'on' : ''}">${l}</button>`).join('')}</div>
     <section class="card fc" data-act="${CS.shown ? '' : 'cardShow'}">
-      <div class="pl">${esc(String(dn).startsWith('c') ? '혼동 어휘' : 'DAY ' + pad2(dn))}${w.h === 0 ? ' · 파생어' : ''}</div>
+      <div class="pl">${esc(locLabel(loc))}${w.h === 0 ? ' · 파생어' : ''}</div>
       ${front}
       ${CS.shown ? back + `<button class="play" data-act="cardSay" aria-label="발음 듣기">${ICON.play}</button>` : `<p class="hint" style="margin-top:24px">${dir === 'en' ? '뜻을 떠올린 뒤 탭하세요' : '단어를 떠올린 뒤 탭하세요'}</p>`}
     </section>
@@ -623,14 +646,14 @@ function idsForRange(r) {
   if (r === 'wrong') return Object.keys(P.wrong).filter((id) => IDX.byId.has(id));
   if (r === 'fav') return Object.keys(P.fav).filter((id) => IDX.byId.has(id));
   if (r === 'today') return todayDays().flatMap((n) => studyWords(n).map((w) => w.id));
-  if (r === 'learned') return Object.keys(P.dayDone).flatMap((n) => studyWords(+n).map((w) => w.id));
+  if (r === 'learned') return Object.keys(PB().dayDone).flatMap((n) => studyWords(+n).map((w) => w.id));
   if (r.startsWith('day:')) return studyWords(+r.slice(4)).map((w) => w.id);
   if (r.startsWith('c')) return confObj(+r.slice(1)).words.map((w) => w.id);
   return [];
 }
 function pool(w, n, key) {           // 같은 DAY(또는 세트)에서, 같은 단어 가족은 빼고 고른다
-  const dn = IDX.dayOf.get(w.id), own = wordsOfRange(dn);
-  const near = String(dn).startsWith('c') ? [] : [dayObj(Math.max(1, dn - 1)), dayObj(Math.min(IDX.nDays, dn + 1))].flatMap((d) => d.words);
+  const loc = IDX.dayOf.get(w.id), own = wordsOf(loc), bk = bookOf(loc.b);
+  const near = String(loc.k).startsWith('c') ? [] : [bk.days[Math.max(1, loc.k - 1) - 1], bk.days[Math.min(bk.days.length, loc.k + 1) - 1]].flatMap((d) => d.words);
   const cand = [...shuffle(own.filter((x) => x.id !== w.id && (x.f == null || x.f !== w.f || x.id.split('.')[0] !== w.id.split('.')[0]))), ...shuffle(near)];
   const out = [], seen = new Set([key(w)]);
   for (const x of cand) { const k = key(x); if (!seen.has(k)) { seen.add(k); out.push(x); } if (out.length >= n) break; }
@@ -659,11 +682,12 @@ function buildQuiz(range, count, types) {
 let QZ = null;
 function startQuiz(qs, title, meta = {}) { QZ = { qs, title, meta, i: 0, results: [], answered: false }; go('#/quiz/run'); }
 function viewQuizHome() {
-  const s = P.settings.quiz, t = s.types, learned = Object.keys(P.dayDone).length;
-  const dayOpts = BOOK.days.map((d) => `<option value="day:${d.day}" ${s.range === 'day:' + d.day ? 'selected' : ''}>DAY ${pad2(d.day)}${P.dayDone[d.day] ? ' ✓' : ''}</option>`).join('');
+  const s = P.settings.quiz, t = s.types, learned = Object.keys(PB().dayDone).length;
+  const dayOpts = BOOK.days.map((d) => `<option value="day:${d.day}" ${s.range === 'day:' + d.day ? 'selected' : ''}>DAY ${pad2(d.day)}${PB().dayDone[d.day] ? ' ✓' : ''}</option>`).join('');
   const confOpts = (BOOK.confusing || []).map((c, k) => `<option value="c${k + 1}" ${s.range === 'c' + (k + 1) ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
   app.innerHTML = `
     <header class="top"><h1>테스트</h1></header>
+    ${bookSwitch()}
     <section class="card">
       <label class="field">범위
         <select id="qRange">
@@ -672,7 +696,7 @@ function viewQuizHome() {
           <option value="wrong" ${s.range === 'wrong' ? 'selected' : ''}>오답 노트</option>
           <option value="fav" ${s.range === 'fav' ? 'selected' : ''}>별표 단어</option>
           <optgroup label="DAY">${dayOpts}</optgroup>
-          <optgroup label="혼동 어휘">${confOpts}</optgroup>
+          ${confOpts ? `<optgroup label="혼동 어휘">${confOpts}</optgroup>` : ''}
         </select>
       </label>
       <div class="seg" id="qCount">${[10, 20, 30, 50].map((n) => `<button data-act="qCount" data-n="${n}" class="${s.count === n ? 'on' : ''}">${n}문제</button>`).join('')}</div>
@@ -686,7 +710,7 @@ function viewQuizHome() {
       <button class="btn primary block" data-act="startQuiz">시작</button>
     </section>
     <section class="card"><div class="row between"><h2>DAY별 최고 점수</h2><span class="muted sm">100점 만점</span></div>
-      <div class="days">${BOOK.days.map((d) => `<button class="dcell ${P.tests[d.day] === 100 ? 'done' : ''}" data-act="quizDay" data-d="${d.day}">${d.day}<small>${P.tests[d.day] != null ? P.tests[d.day] + '점' : '-'}</small></button>`).join('')}</div>
+      <div class="days">${BOOK.days.map((d) => `<button class="dcell ${PB().tests[d.day] === 100 ? 'done' : ''}" data-act="quizDay" data-d="${d.day}">${d.day}<small>${PB().tests[d.day] != null ? PB().tests[d.day] + '점' : '-'}</small></button>`).join('')}</div>
     </section>`;
   $('#qRange').onchange = (e) => { s.range = e.target.value; save(); };
   $$('.ck input').forEach((c) => (c.onchange = () => { s.types[c.dataset.type] = c.checked; save(); }));
@@ -755,7 +779,7 @@ function viewQuizResult() {
   if (!QZ.saved) {
     QZ.saved = true;
     for (const r of R) { if (r.ok) delete P.wrong[r.q.id]; else { P.wrong[r.q.id] = (P.wrong[r.q.id] || 0) + 1; gradeCard(r.q.id, 'again'); } }
-    if (QZ.meta.day) P.tests[QZ.meta.day] = Math.max(P.tests[QZ.meta.day] ?? 0, score);
+    if (QZ.meta.day) PB().tests[QZ.meta.day] = Math.max(PB().tests[QZ.meta.day] ?? 0, score);
     markDay();
   }
   const wrong = R.filter((r) => !r.ok); QZ.wrongList = wrong;
@@ -785,27 +809,27 @@ function viewSettings() {
       <div class="set-row"><span>예문 속도 <b id="rateV">${s.rate.toFixed(2)}</b></span><input type="range" min="0.6" max="1.2" step="0.05" value="${s.rate}" id="rate"></div>
     </section>
     <section class="card"><h2>데이터</h2>
-      <div class="set-row" style="border-top:0"><span>단어 데이터</span><span class="muted">DAY ${IDX.nDays}개 · ${IDX.byId.size}단어</span></div>
-      <div class="set-row"><span>학습 기록</span><span class="muted">완료 ${Object.keys(P.dayDone).length} DAY · 카드 ${Object.keys(P.cards).length}</span></div>
+      <div class="set-row" style="border-top:0"><span>단어 데이터</span><span class="muted">${DATA.books.map((b) => `${b.name} ${b.days.length} DAY`).join(' · ')} · ${IDX.byId.size}단어</span></div>
+      <div class="set-row"><span>학습 기록</span><span class="muted">완료 ${Object.keys(PB().dayDone).length} DAY · 카드 ${Object.keys(P.cards).length}</span></div>
       <label class="btn block">단어 데이터 다시 불러오기<input type="file" id="reimport" accept=".json,application/json" hidden></label>
       <button class="btn block danger" data-act="resetProgress">학습 기록 초기화</button>
-      <p class="hint">출처: ${esc(BOOK.source || '')} · 기록은 이 기기의 이 앱 안에만 저장됩니다.</p>
+      <p class="hint">출처: ${esc(DATA.source || '')} · 기록은 이 기기의 이 앱 안에만 저장됩니다.</p>
     </section>`;
   $$('[data-set]').forEach((c) => (c.onchange = () => { s[c.dataset.set] = c.checked; save(); }));
   $('#voiceA').onchange = (e) => { s.voiceA = e.target.value; save(); playItems([enTTS('This is how example sentences will sound.', null)]); };
   $('#rate').oninput = (e) => { s.rate = +e.target.value; $('#rateV').textContent = s.rate.toFixed(2); save(); };
   $('#reimport').onchange = (e) => importFile(e.target.files[0]);
 }
-TTS.onChange(() => { if (location.hash === '#/settings' && BOOK) viewSettings(); });
+TTS.onChange(() => { if (location.hash === '#/settings' && DATA) viewSettings(); });
 ACT.setPer = (el) => { P.settings.perDay = +el.dataset.n; save(); $$('[data-act="setPer"]').forEach((b) => b.classList.toggle('on', b === el)); };
 ACT.resetProgress = () => {
   if (!confirm('학습 완료 표시, 복습 카드, 오답 노트, 별표, 연속 학습 기록을 모두 지울까요? 되돌릴 수 없습니다.')) return;
-  const settings = P.settings; P = { dayDone: {}, cards: {}, wrong: {}, days: {}, tests: {}, fav: {}, daily: null, settings }; save(); toast('학습 기록을 초기화했습니다'); go('#/');
+  const settings = P.settings; P = { cards: {}, wrong: {}, days: {}, fav: {}, byBook: {}, settings }; save(); toast('학습 기록을 초기화했습니다'); go('#/');
 };
 
 // ================= 시작 =================
 (async () => {
-  try { const d = await IDB.get('book'); if (validBook(d)) { BOOK = d; indexBook(); } } catch {}
+  try { const d = await IDB.get('book'); if (validData(d)) { DATA = d; indexData(); } } catch {}
   route();
 })();
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
